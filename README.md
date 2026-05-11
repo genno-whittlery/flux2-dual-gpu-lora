@@ -1,6 +1,6 @@
 # flux2-dual-gpu-lora
 
-Train FLUX.2-dev LoRAs across two consumer GPUs (e.g., 2× RTX 5090) with Mistral-3 kept in system RAM. Drop-in replacement for [ai-toolkit](https://github.com/ostris/ai-toolkit)'s FLUX.2 trainer, enabled via a single env var. First-known public implementation — closes the gap in ai-toolkit issue [#531](https://github.com/ostris/ai-toolkit/issues/531).
+Train FLUX.2-dev LoRAs across any pair of 24+ GB CUDA GPUs (2× RTX 3090, 2× RTX 4090, 2× RTX 5090) with Mistral-3 kept in system RAM. Drop-in replacement for [ai-toolkit](https://github.com/ostris/ai-toolkit)'s FLUX.2 trainer, enabled via a single env var. First-known public implementation — closes the gap in ai-toolkit issue [#531](https://github.com/ostris/ai-toolkit/issues/531).
 
 ## The numbers
 
@@ -23,8 +23,8 @@ This patch does three things in stack:
 
 ## Who this helps
 
-- **2× RTX 5090 owners** — moves training from 14.4 → 277 s/it (WDDM thrash on single 5090) to 2.85 s/it sustained. Validated end-to-end.
-- **2× RTX 4090 / 2× RTX 3090 owners (expected — no device to test)** — each card carries 24 GB; with the transformer split ~16 GB per card the model fits where it couldn't on a single 24 GB card at all. On a single 4090 or 3090, FLUX.2 LoRA training doesn't run — the transformer overflows even with WDDM paging. The dual-GPU split should move it from impossible → buildable. Same env-var path; `FLUX2_DUAL_GPU_SPLIT_AT` can be tuned if the default midpoint lands unevenly. Reports welcome.
+- **2× RTX 4090 / 2× RTX 3090 owners (expected — no device to test)** — each card carries 24 GB; with the transformer split ~16 GB per card the model fits where it couldn't on a single 24 GB card *at all*. On a single 4090 or 3090, FLUX.2 LoRA training doesn't run — the transformer overflows even with WDDM paging. The dual-GPU split should move it from impossible → buildable. This is the biggest reach of this patch: 24 GB cards are easy to get (3090s on the used market, 4090s widely available), 5090s are not. Same env-var path; `FLUX2_DUAL_GPU_SPLIT_AT` can be tuned if the default midpoint lands unevenly. Reports welcome.
+- **2× RTX 5090 owners (validated end-to-end)** — moves training from 14.4 → 277 s/it (WDDM thrash on single 5090) to 2.85 s/it sustained. The reference setup for this patch's development.
 - **Mixed setups (e.g., 5090 + 4090, 4090 + 3090)** — also expected to work, with `FLUX2_DUAL_GPU_SPLIT_AT` biased so the smaller card carries fewer blocks. Untested.
 
 ## Quick start
