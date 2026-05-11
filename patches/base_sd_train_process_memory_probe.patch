@@ -1,0 +1,82 @@
+Apply this small diff to ai-toolkit's `jobs/process/BaseSDTrainProcess.py` to
+enable the optional `FLUX2_MEMORY_PROBE_STEPS` diagnostic. Env-gated; no
+behavior change when the env var is unset.
+
+The probe emits a per-GPU `torch.cuda.memory_summary()` at each relative
+training step listed. Useful for distinguishing a working-set leak (allocated
+growing across probes) from an intrinsic over-capacity transient (peak >
+VRAM at every probe with cur staying constant).
+
+Locate the existing block in `BaseSDTrainProcess.run()` (near the end of the
+training loop body, where `self.step_num` is incremented) and add the probe
+right after it:
+
+```python
+                # update various steps
+                self.step_num = step + 1
+                self.grad_accumulation_step += 1
+                self.end_step_hook()
+
+                # >>> ADD: optional per-step memory probe ---------------------
+                _probe_steps_env = os.getenv("FLUX2_MEMORY_PROBE_STEPS")
+                if _probe_steps_env:
+                    try:
+                        _probe_steps = {
+                            int(s) for s in _probe_steps_env.split(",") if s.strip()
+                        }
+                        _rel = self.step_num - getattr(self, "start_step", 0)
+                        if _rel in _probe_steps:
+                            print(
+                                f"\n[MEMORY_PROBE] step_num={self.step_num} "
+                                f"rel_step={_rel}",
+                                flush=True,
+                            )
+                            for _gpu in range(torch.cuda.device_count()):
+                                _alloc = torch.cuda.memory_allocated(_gpu) / (1024 ** 3)
+                                _reserv = torch.cuda.memory_reserved(_gpu) / (1024 ** 3)
+                                _peak_a = torch.cuda.max_memory_allocated(_gpu) / (1024 ** 3)
+                                _peak_r = torch.cuda.max_memory_reserved(_gpu) / (1024 ** 3)
+                                print(
+                                    f"[MEMORY_PROBE] GPU{_gpu} "
+                                    f"allocated={_alloc:.2f}GB "
+                                    f"reserved={_reserv:.2f}GB "
+                                    f"peak_alloc={_peak_a:.2f}GB "
+                                    f"peak_reserv={_peak_r:.2f}GB",
+                                    flush=True,
+                                )
+                                print(
+                                    f"[MEMORY_PROBE] GPU{_gpu} === full summary ===",
+                                    flush=True,
+                                )
+                                print(
+                                    torch.cuda.memory_summary(
+                                        device=_gpu, abbreviated=True
+                                    ),
+                                    flush=True,
+                                )
+                    except Exception as _probe_err:
+                        print(f"[MEMORY_PROBE] error: {_probe_err}", flush=True)
+                # <<< END ADD -------------------------------------------------
+```
+
+Usage:
+
+```bash
+export FLUX2_MEMORY_PROBE_STEPS=1,50,100,500
+python run.py config/your-character.yaml
+```
+
+The probe fires at relative steps 1, 50, 100, and 500 counted from
+`start_step` (= the checkpoint resume point if you're resuming, else 0).
+
+Worked example (single 5090, no dual-GPU, FLUX.2 LoRA, Suzurin training):
+
+```
+[MEMORY_PROBE] step_num=1001 rel_step=1
+[MEMORY_PROBE] GPU0 allocated=30.63GB reserved=31.14GB peak_alloc=32.94GB peak_reserv=34.05GB
+```
+
+`peak_alloc=32.94 GB` vs `GPU capacity = 31.84 GB` → the bug isn't a leak,
+it's a per-step forward overshoot of ~1.1 GB getting paged through unified
+memory every iteration. This is the diagnostic that justifies the dual-GPU
+patch over hypothetical leak-fixes.
