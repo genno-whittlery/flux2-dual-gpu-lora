@@ -141,10 +141,16 @@ def enable_flux2_dual_gpu(transformer: nn.Module) -> nn.Module:
     transformer.norm_out.to(cuda0)
     transformer.proj_out.to(cuda0)
 
-    # 2. Register pre-hooks for the cross-device boundaries.
-    transformer.single_transformer_blocks[split_at].register_forward_pre_hook(
-        _make_device_bridge_hook(cuda1), with_kwargs=True
-    )
+    # 2. Register pre-hooks on EVERY cuda:1 block, not just the boundary.
+    # The modulation/temb tensor is computed once and passed to each block in
+    # a loop — only hooking block[split_at] leaves temb on cuda:0 for the
+    # *next* block's call, because the loop-level temb variable in the
+    # caller isn't transformed by the boundary hook. Per-block hooks fix
+    # that at the cost of one extra (no-op when already on device) walk.
+    for block in transformer.single_transformer_blocks[split_at:]:
+        block.register_forward_pre_hook(
+            _make_device_bridge_hook(cuda1), with_kwargs=True
+        )
     transformer.norm_out.register_forward_pre_hook(
         _make_device_bridge_hook(cuda0), with_kwargs=True
     )
