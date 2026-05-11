@@ -156,7 +156,11 @@ The patch lives in ai-toolkit today. A survey of other FLUX.2 LoRA trainers (mus
 
 A concrete porting plan for musubi-tuner — hook points, complexity comparison, validation plan, upstream strategy — is at [`docs/porting-musubi-tuner.md`](docs/porting-musubi-tuner.md). The implementation lives on a Genno fork branch ([genno-whittlery/musubi-tuner:dual-gpu-flux2](https://github.com/genno-whittlery/musubi-tuner/tree/dual-gpu-flux2)) — +304 LOC across 3 files. Awaiting hardware validation before opening an upstream PR.
 
-For HuggingFace **diffusers** users (the `train_dreambooth_lora_flux2*.py` reference scripts): a drop-in helper file plus a 3-line integration guide is at [`examples/diffusers/`](examples/diffusers/). The diffusers port is the smallest of the three — PEFT handles LoRA routing automatically, and the helper uses PyTorch forward pre-hooks to bridge devices instead of overriding the transformer's forward. ~130 LOC, no patches to diffusers itself.
+For HuggingFace **diffusers** users (the `train_dreambooth_lora_flux2*.py` reference scripts): a drop-in helper file plus a 3-line integration guide is at [`examples/diffusers/`](examples/diffusers/). PEFT handles LoRA routing automatically, and the helper uses PyTorch forward pre-hooks to bridge devices instead of overriding the transformer's forward. ~130 LOC, no patches to diffusers itself.
+
+For **OneTrainer** users (the GUI-based trainer with FLUX.2 Dev + Klein support): the port lives on a Genno fork branch ([genno-whittlery/OneTrainer:dual-gpu-flux2](https://github.com/genno-whittlery/OneTrainer/tree/dual-gpu-flux2)) — +189 LOC across 2 files. Closes their open issue [#588](https://github.com/Nerogar/OneTrainer/issues/588) (multi-GPU training, open since 2024-11) for the model-parallel case. OneTrainer wraps the diffusers `Flux2Transformer2DModel`, so the same pre-hook bridge logic applies; per-LoRA routing reads `orig_module.weight.device` directly. Awaiting hardware validation before upstream PR.
+
+For **DiffSynth-Studio** users (modelscope's 12.4k-star trainer with a FLUX.2-dev LoRA recipe): a drop-in helper plus a 2-line integration guide is at [`examples/diffsynth/`](examples/diffsynth/). DiffSynth's `Flux2DiT` mirrors the diffusers `Flux2Transformer2DModel` field-for-field and uses PEFT for LoRA, so this port reuses the same pre-hook bridge shape. ~130 LOC, no patches to diffsynth itself. Upstream PR pending (would benefit from a bilingual Mandarin/English description for the modelscope community).
 
 ## Contributing
 
