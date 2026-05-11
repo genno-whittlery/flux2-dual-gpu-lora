@@ -4,7 +4,33 @@
 
 **Estimated effort:** 200–300 LOC, smaller than ai-toolkit's 460 because musubi's architecture is structurally cleaner for our purposes.
 
-This is a **plan**, not yet implemented. Validation will need the same 2× RTX 5090 rack used for ai-toolkit.
+**Status (2026-05-11):** Validated end-to-end on 2× RTX 5090. See [Validation status](#validation-status) below.
+
+## Setup — dedicated venv (recommended)
+
+Use a separate Python environment for musubi-tuner rather than reusing ai-toolkit's. Sharing one venv between two trainers pulls in conflicting pins (different `lycoris-lora`, `accelerate`, `diffusers` versions) and the "what changed?" question gets impossible to answer when something breaks.
+
+```powershell
+# Pick the same Python 3.12 you already have (uv keeps copies under %APPDATA%\Roaming\uv\python\)
+$basePy = "C:\Users\<you>\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe"
+& $basePy -m venv C:\musubi-tuner\.venv
+
+# CUDA 13 wheel — required for Blackwell (sm_120). On Ada (40-series) use cu128 or cu124.
+& C:\musubi-tuner\.venv\Scripts\python.exe -m pip install --upgrade pip wheel setuptools
+& C:\musubi-tuner\.venv\Scripts\python.exe -m pip install torch==2.11.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+
+# Install musubi-tuner editable from your clone of the dual-gpu fork
+& C:\musubi-tuner\.venv\Scripts\python.exe -m pip install -e C:\musubi-tuner
+
+# Extras musubi's pyproject doesn't pull but the FLUX.2 path needs
+& C:\musubi-tuner\.venv\Scripts\python.exe -m pip install "lycoris-lora>=3.0" torchao
+```
+
+Verify imports:
+
+```powershell
+& C:\musubi-tuner\.venv\Scripts\python.exe -c "from musubi_tuner.flux_2 import flux2_dual_gpu; from musubi_tuner.networks import lora_flux_2; from lycoris.kohya import create_network_from_weights; print('OK')"
+```
 
 ## Why musubi is cleaner to port
 
