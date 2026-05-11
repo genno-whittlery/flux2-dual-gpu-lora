@@ -9,14 +9,16 @@ Train FLUX.2-dev LoRAs across any pair of 24+ GB CUDA GPUs (2× RTX 3090, 2× RT
 | Single RTX 5090, ai-toolkit default | 14.4 s/it → 277 s/it (WDDM thrash) | 90 min → 30+ hours |
 | **Dual RTX 5090, ai-toolkit + this patch** | **2.85 s/it sustained** | **~19 min** |
 | **Dual RTX 5090, musubi-tuner + this patch** | **2.22 s/it sustained** | **~15 min** |
-| **Dual RTX 5090, OneTrainer + this patch** | **~0.95 s/it sustained** | **~6.5 min** |
 | **Dual RTX 5090, DiffSynth-Studio + this patch** | **2.69 s/it sustained** | **~18 min** |
+| Dual RTX 5090, OneTrainer + this patch | 0.95 s/it ⚠️ — see note below | — |
+
+> ⚠️ **OneTrainer is not apples-to-apples with the other three.** The OneTrainer config used `transformer.weight_dtype: INT_W8A8` (INT8 weights + INT8 activations through tensor cores) and a narrower LoRA target set (`layer_filter_preset: "blocks"`), while the other trainers ran bf16 / fp8-weight-only with wider LoRA targets. INT8 tensor-core matmul is ~2–3× faster than bf16 on Blackwell — most of the speed gap is precision, not trainer architecture. Re-running OneTrainer with bf16 base + matched LoRA targets would put it in the same 2–3 s/it band as the others. The "real" OneTrainer-specific wins (PEFT-style LoRA wrappers, diffusers-backed attention) are probably ~1.2–1.5× over musubi at most.
 
 Per-GPU footprint at runtime: ~20 GB on GPU 0, ~12 GB on GPU 1, both alternating at 99% SM utilization. No thrashing, no degradation.
 
 The musubi-tuner port runs ~21% faster than ai-toolkit on the same hardware (different attention path, different LoRA wrapper overhead) — validated end-to-end with `--fp8_base --fp8_scaled --gradient_checkpointing` on sumi v8 (32 imgs @ 512², 10-step smoke; loss 0.526 → 0.545 monotonic across the run; both checkpoints saved).
 
-The OneTrainer port runs another ~2.3× faster than musubi (~0.95 s/it vs 2.22 s/it) — sustained 1.05 it/s through a full 32-step epoch on the same sumi v8 dataset, LoRA checkpoint saved (402 MB). The gap is likely OneTrainer's diffusers-backed attention path vs. musubi's `--sdpa`, plus PEFT-flavored LoRA wrappers vs. musubi's kohya-style; first-step compile (~71s) is the only outlier.
+The OneTrainer port sustained 1.05 it/s (0.95 s/it) through a full 32-step epoch on the same sumi v8 dataset and saved a 402 MB LoRA checkpoint. **But that run used INT8 weight + INT8 activation quant on the transformer and a narrower LoRA target set than the other trainers** — see the warning under the numbers table. Treat OneTrainer's number as evidence the patch works end-to-end on a fourth trainer, not as evidence of a 2.3× architectural advantage; an apples-to-apples bf16 / matched-LoRA-target run on OneTrainer would land in the same 2–3 s/it band as the others.
 
 ## Why this exists
 
