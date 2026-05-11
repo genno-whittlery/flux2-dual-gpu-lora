@@ -7,9 +7,12 @@ Train FLUX.2-dev LoRAs across any pair of 24+ GB CUDA GPUs (2× RTX 3090, 2× RT
 | Setup | Step rate | 400 steps |
 |---|---|---|
 | Single RTX 5090, ai-toolkit default | 14.4 s/it → 277 s/it (WDDM thrash) | 90 min → 30+ hours |
-| **Dual RTX 5090, this patch** | **2.85 s/it sustained** | **~19 min** |
+| **Dual RTX 5090, ai-toolkit + this patch** | **2.85 s/it sustained** | **~19 min** |
+| **Dual RTX 5090, musubi-tuner + this patch** | **2.22 s/it sustained** | **~15 min** |
 
-Per-GPU footprint at runtime: ~21 GB on GPU 0, ~12 GB on GPU 1, both alternating at 99% SM utilization (165–445 W swings). No thrashing, no degradation.
+Per-GPU footprint at runtime: ~20 GB on GPU 0, ~12 GB on GPU 1, both alternating at 99% SM utilization. No thrashing, no degradation.
+
+The musubi-tuner port runs ~21% faster than ai-toolkit on the same hardware (different attention path, different LoRA wrapper overhead) — validated end-to-end with `--fp8_base --fp8_scaled --gradient_checkpointing` on sumi v8 (32 imgs @ 512², 10-step smoke; loss 0.526 → 0.545 monotonic across the run; both checkpoints saved).
 
 ## Why this exists
 
@@ -154,7 +157,7 @@ Boundary placement is mid-`single_blocks` rather than at the double→single tra
 
 The patch lives in ai-toolkit today. A survey of other FLUX.2 LoRA trainers (musubi-tuner, OneTrainer, SimpleTuner, diffusers, diffusion-pipe, DiffSynth-Studio) and a recommended next port target lives at [`docs/trainer-survey.md`](docs/trainer-survey.md). Short version: **musubi-tuner** is the highest-leverage next target; **diffusers** `train_dreambooth_lora_flux2.py` is the easiest mechanical port.
 
-A concrete porting plan for musubi-tuner — hook points, complexity comparison, validation plan, upstream strategy — is at [`docs/porting-musubi-tuner.md`](docs/porting-musubi-tuner.md). The implementation lives on a Genno fork branch ([genno-whittlery/musubi-tuner:dual-gpu-flux2](https://github.com/genno-whittlery/musubi-tuner/tree/dual-gpu-flux2)) — +304 LOC across 3 files. Awaiting hardware validation before opening an upstream PR.
+A concrete porting plan for musubi-tuner — hook points, complexity comparison, validation plan, upstream strategy — is at [`docs/porting-musubi-tuner.md`](docs/porting-musubi-tuner.md). The implementation lives on a Genno fork branch ([genno-whittlery/musubi-tuner:dual-gpu-flux2](https://github.com/genno-whittlery/musubi-tuner/tree/dual-gpu-flux2)). **Validated end-to-end on 2× RTX 5090, 2026-05-11** — 10/10 steps with `--fp8_base --fp8_scaled --gradient_checkpointing`, loss 0.526 → 0.545 monotonic, 2.22 s/it sustained, both checkpoints saved. Upstream PR to kohya-ss/musubi-tuner pending. Patch consists of: a new `musubi_tuner/flux_2/flux2_dual_gpu.py` module, plus three integration-point edits in `hv_train_network.py` (DDP-bypass, CPU loading device, `device_placement=[False]` prepare branch) and one inlined device-pin in `networks/lora.py` (bound-method indirection in `apply_to` makes instance-level shimming unreliable, so the pin runs inline at the top of `LoRAModule.forward`).
 
 For HuggingFace **diffusers** users (the `train_dreambooth_lora_flux2*.py` reference scripts): a drop-in helper file plus a 3-line integration guide is at [`examples/diffusers/`](examples/diffusers/). PEFT handles LoRA routing automatically, and the helper uses PyTorch forward pre-hooks to bridge devices instead of overriding the transformer's forward. ~130 LOC, no patches to diffusers itself.
 

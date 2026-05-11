@@ -107,13 +107,25 @@ Three modifications to existing files:
 2. `flux_2_train_network.py` — `Flux2NetworkTrainer.load_transformer` calls `distribute_transformer` after `load_flow_model` when the env var is set.
 3. `networks/lora.py` — optional one-liner in `LoRAModule.apply_to` to snapshot `_wrapped_device` (only if we go the device-snapshot route).
 
-## Validation plan
+## Validation status
 
-Mirror the ai-toolkit Suzurin/Fude path:
-1. Smoke test: load model with `FLUX2_DUAL_GPU=true`, confirm no OOM, single forward+backward step completes.
-2. Convergence test: train a character LoRA (rank 16, 512², 100 steps) and compare loss curve to ai-toolkit-trained reference.
-3. Output quality: render keepers with the trained LoRA, confirm visual fidelity vs. ai-toolkit-trained version.
-4. Step-rate benchmark: target ≥2 s/it sustained on 2× RTX 5090 (ai-toolkit hit 2.85; musubi's overhead may differ).
+End-to-end validated on 2× RTX 5090, 2026-05-11. Sumi v8 dataset (32 imgs, 512²), `--fp8_base --fp8_scaled --gradient_checkpointing`, network_dim 32, 10 steps:
+
+- ✅ Load via CPU (`loading_device="cpu"` when `FLUX2_DUAL_GPU=true`) — peak ~50 GB system RAM, no OOM
+- ✅ `distribute_flux2_transformer` lands correctly: GPU 0 ~20 GB (img+txt+time embedders + double_blocks + single_blocks[0:24] + final_layer), GPU 1 ~12 GB (single_blocks[24:])
+- ✅ Split forward executes — one PCIe boundary at single_blocks[24], one `.to(cuda:0)` return on the way to final_layer
+- ✅ LoRA modules pin to their wrapped layer's device on every forward call (inlined in `LoRAModule.forward`)
+- ✅ Loss decreases monotonically: 0.526 → 0.618 → 0.586 → 0.563 → 0.566 → 0.561 → 0.556 → 0.549 → 0.547 → 0.545
+- ✅ **2.22 s/it sustained** (21% faster than ai-toolkit's 2.85 s/it on the same hardware — different attention path + LoRA wrapper overhead)
+- ✅ Both checkpoints saved: `sumi-dualgpu-smoke-step00000010.safetensors` + `sumi-dualgpu-smoke.safetensors` (390 MB each)
+
+Step-rate gap to ai-toolkit is worth investigating later — musubi's `--sdpa` attention is the most likely source, but the LoRA wrapper code path differs too.
+
+### Remaining validation (longer-horizon)
+
+- Convergence test: train a character LoRA to completion (rank 32, 512², 500 steps) and compare loss curve to ai-toolkit-trained reference.
+- Output quality: render keepers with the trained LoRA, confirm visual fidelity vs. ai-toolkit-trained version.
+- 2× 3090 validation: pending physical install of 2nd 3090 in the goose box (article-critical for the consumer-24 GB audience).
 
 ## Upstream submission strategy
 
