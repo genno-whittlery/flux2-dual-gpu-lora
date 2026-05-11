@@ -21,11 +21,17 @@ This patch does three things in stack:
 2. **Transformer split across two GPUs** — pipeline-parallel at the single_blocks midpoint, ~16 GB transformer per side, single ~18 MB activation crossing PCIe per forward.
 3. **fp8 weight-only quantization** — Black Forest Labs' production deployment format (Float8WeightOnlyConfig via torchao). Activations and gradients stay bf16; only weights are quantized. This is meaningfully different from int8 weight-only, which hurts LoRA gradient quality.
 
+## Who this helps
+
+- **2× RTX 5090 owners** — moves training from 14.4 → 277 s/it (WDDM thrash on single 5090) to 2.85 s/it sustained. Validated end-to-end.
+- **2× RTX 4090 / 2× RTX 3090 owners (expected — no device to test)** — each card carries 24 GB; with the transformer split ~16 GB per card the model fits where it couldn't on a single 24 GB card at all. On a single 4090 or 3090, FLUX.2 LoRA training doesn't run — the transformer overflows even with WDDM paging. The dual-GPU split should move it from impossible → buildable. Same env-var path; `FLUX2_DUAL_GPU_SPLIT_AT` can be tuned if the default midpoint lands unevenly. Reports welcome.
+- **Mixed setups (e.g., 5090 + 4090, 4090 + 3090)** — also expected to work, with `FLUX2_DUAL_GPU_SPLIT_AT` biased so the smaller card carries fewer blocks. Untested.
+
 ## Quick start
 
 ### 1. Requirements
 
-- Two CUDA GPUs, ≥32 GB each (validated on 2× RTX 5090, sm_120)
+- Two CUDA GPUs, ≥24 GB each (validated on 2× RTX 5090 / sm_120; 2× RTX 4090 and 2× RTX 3090 should also work but have not been tested)
 - Host RAM: ≥128 GB recommended (Mistral bf16 in CPU memory needs ~50 GB)
 - ai-toolkit checkout (validated against FLUX.2 branch as of 2026-05-10)
 - PyTorch ≥2.4 with CUDA 12.x or 13.x
@@ -118,6 +124,7 @@ Per-step cross-PCIe traffic: ~36 MB (one forward + one backward × 18 MB activat
 - **Single-batch pipeline-parallel.** Only one micro-batch in flight at a time; one GPU computes while the other waits. Multi-microbatch pipelining (gpipe / 1F1B-style) would push utilization higher — open for v2.
 - **ai-toolkit-version-coupled.** The monkey-patches reference specific class names (`ToolkitNetworkMixin`, `LoRANetwork`) and function paths (`network_mixins.broadcast_and_multiply`). If ai-toolkit refactors these, the patches need updating.
 - **Validated for FLUX.2-dev specifically.** FLUX.2-klein and FLUX.2-pro variants likely work given the same architecture but haven't been exercised.
+- **2× RTX 4090 / 2× RTX 3090 / mixed setups untested.** Architecturally the split applies (each card carries ~16 GB of transformer weights, well under 24 GB) but I don't have the rack to validate. Anyone running this on 2× 4090 or 2× 3090 — please open an issue with step rate + GPU memory snapshot.
 
 ## Diagnostic: per-step memory probe
 
