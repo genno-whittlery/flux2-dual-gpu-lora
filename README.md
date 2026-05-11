@@ -154,6 +154,8 @@ Boundary placement is mid-`single_blocks` rather than at the double→single tra
 
 The patch lives in ai-toolkit today. A survey of other FLUX.2 LoRA trainers (musubi-tuner, OneTrainer, SimpleTuner, diffusers, diffusion-pipe, DiffSynth-Studio) and a recommended next port target lives at [`docs/trainer-survey.md`](docs/trainer-survey.md). Short version: **musubi-tuner** is the highest-leverage next target; **diffusers** `train_dreambooth_lora_flux2.py` is the easiest mechanical port.
 
+A concrete porting plan for musubi-tuner — hook points, complexity comparison, validation plan, upstream strategy — is at [`docs/porting-musubi-tuner.md`](docs/porting-musubi-tuner.md). Estimated 200–300 LOC, smaller than the ai-toolkit patch because musubi's text encoder is already disk-cached and its `LoRAModule.apply_to` is cleaner. Not yet implemented; contributions welcome.
+
 ## Contributing
 
 PRs welcome, especially:
