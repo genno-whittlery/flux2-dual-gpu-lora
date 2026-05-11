@@ -7,25 +7,29 @@ Train FLUX.2-dev LoRAs across any pair of 24+ GB CUDA GPUs (2× RTX 3090, 2× RT
 | Setup | Step rate | 400 steps |
 |---|---|---|
 | Single RTX 5090, ai-toolkit default | 14.4 s/it → 277 s/it (WDDM thrash) | 90 min → 30+ hours |
-| **Dual RTX 5090, ai-toolkit + this patch** | **2.85 s/it sustained** | **~19 min** |
-| **Dual RTX 5090, musubi-tuner + this patch** | **2.22 s/it sustained** | **~15 min** |
-| **Dual RTX 5090, DiffSynth-Studio + this patch** | **2.69 s/it sustained** | **~18 min** |
-| Dual RTX 5090, OneTrainer + this patch | 0.95 s/it ⚠️ — see note below | — |
+| **Dual RTX 5090, ai-toolkit + this patch** (fp8 weight-only, bf16 compute) | **2.85 s/it sustained** | **~19 min** |
+| **Dual RTX 5090, musubi-tuner + this patch** (fp8 weight-only, bf16 compute) | **2.22 s/it sustained** | **~15 min** |
+| **Dual RTX 5090, DiffSynth-Studio + this patch** (fp8 weight-only, bf16 compute) | **2.69 s/it sustained** | **~18 min** |
+| **Dual RTX 5090, OneTrainer + this patch** (fp8 W8A8 compute) | **1.75 s/it sustained** | **~11 min** |
+| **Dual RTX 5090, OneTrainer + this patch** (int8 W8A8 compute) | **0.95 s/it sustained** | **~6 min** |
 
-> ⚠️ **OneTrainer is in a different compute-precision class.** The four trainers differ on *which* form of 8-bit they use, which matters because tensor-core dispatch depends on the *activation* dtype, not just the weight dtype:
+> **Compare within precision class, not across.** All five rows use this patch's dual-GPU split (split shape is identical — 20.7 GB cuda:0 / 12.6 GB cuda:1 — regardless of quant scheme). What differs across rows is *what* the matmul actually runs in, which determines which tensor-core path lights up:
 >
-> | Trainer | Weight | Activation @ matmul | TC class |
+> | Mode | Weight storage | Activation @ matmul | TC throughput on 5090 |
 > |---|---|---|---|
-> | ai-toolkit / musubi / DiffSynth + this patch | fp8 weight-only | bf16 | bf16 (~165 TF on 5090) |
-> | OneTrainer + this patch | INT8 (`INT_W8A8`) | INT8 | int8 (~330 TF on 5090) |
+> | **fp8 weight-only / bf16 compute** | fp8 (halved memory) | bf16 | ~165 TF (bf16 cores) |
+> | **fp8 W8A8 compute** | fp8 (halved memory) | fp8 | ~330 TF (fp8 cores) |
+> | **int8 W8A8 compute** | int8 (halved memory) | int8 | ~660 TF (int8 cores) |
 >
-> The three "weight-only-fp8" trainers store weights in fp8 (memory halved — the whole reason this patch exists) but dequantize to bf16 at matmul time. OneTrainer's `INT_W8A8` keeps activations in 8-bit too, dispatching to the int8 GEMM which is ~2× the bf16 throughput on Blackwell. That accounts for most of the 2.69 → 0.95 s/it gap. A fair apples-to-apples re-run would set OneTrainer's `transformer.weight_dtype` to `FLOAT_8` (weight-only fp8) and the result should land in the same 2–3 s/it band as the other three. None of this is about the dual-GPU split — the split shape itself is identical across all four (20.7 GB cuda:0 / 12.6 GB cuda:1).
+> ai-toolkit / musubi / DiffSynth do *weight-only* quant — weights are fp8 on disk and in VRAM, but get dequantized to bf16 at every matmul (the whole point is the memory savings, not the compute). OneTrainer has its own `LinearW8A8` class (`modules/module/quantized/LinearW8A8.py`) that keeps activations in 8-bit and dispatches the matmul through `torch._scaled_mm` (fp8) or `torch._int_mm` (int8) — both engage the higher-throughput Blackwell tensor-core paths. The OneTrainer 1.75 → 0.95 jump is the int8 cores being ~2× the fp8 cores on this hardware.
+>
+> So the honest framing is: **the patch makes all four trainers work on dual 32 GB; the trainer authors made independent choices about whether to chase compute-precision speedups beyond that.** Bringing the bf16-compute trainers (ai-toolkit / musubi / DiffSynth) into the same class as OneTrainer would mean wiring `torchao.Float8DynamicActivationFloat8WeightConfig` (proper fp8 W8A8) into their patches; that path was deferred earlier because torchao's W8A8 dispatcher had a cross-device-bridging bug we ran into in the diffusers reference script, and the LoRA-skip filter fix that unblocked the DiffSynth weight-only path hasn't been re-tested against the W8A8 dispatcher.
 
 Per-GPU footprint at runtime: ~20 GB on GPU 0, ~12 GB on GPU 1, both alternating at 99% SM utilization. No thrashing, no degradation.
 
 The musubi-tuner port runs ~21% faster than ai-toolkit on the same hardware (different attention path, different LoRA wrapper overhead) — validated end-to-end with `--fp8_base --fp8_scaled --gradient_checkpointing` on sumi v8 (32 imgs @ 512², 10-step smoke; loss 0.526 → 0.545 monotonic across the run; both checkpoints saved).
 
-The OneTrainer port sustained 1.05 it/s (0.95 s/it) through a full 32-step epoch on the same sumi v8 dataset and saved a 402 MB LoRA checkpoint. **But that run was in a different compute-precision class than the other three** — `INT_W8A8` quant on the transformer means the matmul dispatches to int8 tensor cores (~330 TF) rather than bf16 (~165 TF), giving a ~2× compute speedup that's orthogonal to the dual-GPU split. See the warning under the numbers table. Treat OneTrainer's number as evidence the patch works end-to-end on a fourth trainer, not as evidence of a 2.3× architectural advantage; an apples-to-apples run with OneTrainer's `transformer.weight_dtype` set to `FLOAT_8` (matching the other trainers' bf16-act / fp8-weight-only mode) would put it in the same 2–3 s/it band.
+The OneTrainer port has been validated end-to-end in **both** of its 8-bit-compute modes on the same sumi v8 dataset: `INT_W8A8` clocks 0.95 s/it (int8 tensor cores), `FLOAT_8` (= W8A8 fp8 compute, not weight-only) clocks 1.75 s/it (fp8 tensor cores), saving 402 MB and 384 MB LoRA checkpoints respectively. OneTrainer doesn't ship a "weight-only fp8" mode for the dit — its `LinearW8A8` class always quantizes activations too. So the apples-to-apples comparison with the other three (which run fp8 weight-only / bf16 compute) isn't currently possible on the OneTrainer side; what it does show is that **the dual-GPU split is independent of compute-precision choice** — the distribution shape (20.7 GB cuda:0 / 12.6 GB cuda:1) is identical across all four trainers and all three precision classes.
 
 ## Why this exists
 
