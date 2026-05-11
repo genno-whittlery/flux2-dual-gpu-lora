@@ -9,10 +9,13 @@ Train FLUX.2-dev LoRAs across any pair of 24+ GB CUDA GPUs (2× RTX 3090, 2× RT
 | Single RTX 5090, ai-toolkit default | 14.4 s/it → 277 s/it (WDDM thrash) | 90 min → 30+ hours |
 | **Dual RTX 5090, ai-toolkit + this patch** | **2.85 s/it sustained** | **~19 min** |
 | **Dual RTX 5090, musubi-tuner + this patch** | **2.22 s/it sustained** | **~15 min** |
+| **Dual RTX 5090, OneTrainer + this patch** | **~0.95 s/it sustained** | **~6.5 min** |
 
 Per-GPU footprint at runtime: ~20 GB on GPU 0, ~12 GB on GPU 1, both alternating at 99% SM utilization. No thrashing, no degradation.
 
 The musubi-tuner port runs ~21% faster than ai-toolkit on the same hardware (different attention path, different LoRA wrapper overhead) — validated end-to-end with `--fp8_base --fp8_scaled --gradient_checkpointing` on sumi v8 (32 imgs @ 512², 10-step smoke; loss 0.526 → 0.545 monotonic across the run; both checkpoints saved).
+
+The OneTrainer port runs another ~2.3× faster than musubi (~0.95 s/it vs 2.22 s/it) — sustained 1.05 it/s through a full 32-step epoch on the same sumi v8 dataset, LoRA checkpoint saved (402 MB). The gap is likely OneTrainer's diffusers-backed attention path vs. musubi's `--sdpa`, plus PEFT-flavored LoRA wrappers vs. musubi's kohya-style; first-step compile (~71s) is the only outlier.
 
 ## Why this exists
 
@@ -161,9 +164,11 @@ A concrete porting plan for musubi-tuner — hook points, complexity comparison,
 
 For HuggingFace **diffusers** users (the `train_dreambooth_lora_flux2*.py` reference scripts): a drop-in helper file plus a 3-line integration guide is at [`examples/diffusers/`](examples/diffusers/). PEFT handles LoRA routing automatically, and the helper uses PyTorch forward pre-hooks to bridge devices instead of overriding the transformer's forward. ~130 LOC, no patches to diffusers itself.
 
-For **OneTrainer** users (the GUI-based trainer with FLUX.2 Dev + Klein support): the port lives on a Genno fork branch ([genno-whittlery/OneTrainer:dual-gpu-flux2](https://github.com/genno-whittlery/OneTrainer/tree/dual-gpu-flux2)) — +189 LOC across 2 files. Closes their open issue [#588](https://github.com/Nerogar/OneTrainer/issues/588) (multi-GPU training, open since 2024-11) for the model-parallel case. OneTrainer wraps the diffusers `Flux2Transformer2DModel`, so the same pre-hook bridge logic applies; per-LoRA routing reads `orig_module.weight.device` directly.
+For **OneTrainer** users (the GUI-based trainer with FLUX.2 Dev + Klein support): the port lives on a Genno fork branch ([genno-whittlery/OneTrainer:dual-gpu-flux2](https://github.com/genno-whittlery/OneTrainer/tree/dual-gpu-flux2)). **Validated end-to-end on 2× RTX 5090, 2026-05-11** — full 32-step epoch on sumi v8, ~1.05 it/s sustained, LoRA saved. Closes their open issue [#588](https://github.com/Nerogar/OneTrainer/issues/588) (multi-GPU training, open since 2024-11) for the model-parallel case. Patch consists of: a new `modules/util/Flux2DualGpu.py` module, plus two integration-point edits in `modules/model/Flux2Model.py` (forced TE-on-CPU + `transformer_to` routes to distribute). One companion change to the third-party `mgds` data-loader (PR pending to Nerogar/mgds): `EncodeMistralText.get_item` moves `tokens` and `attention_mask` to `text_encoder.device` before the forward call, so CPU-hosted Mistral receives CPU-side inputs instead of cuda:0 ones. Setup notes:
 
-**OneTrainer status (2026-05-11):** dedicated venv built + patch in place + sumi config authored end-to-end. Validation is gated on the diffusers-folder format of FLUX.2-dev (~60 GB download via `huggingface_hub.snapshot_download` from `black-forest-labs/FLUX.2-dev`) — OneTrainer doesn't accept single-file `.safetensors` for the base model. Same gating applies to the diffusers reference scripts (`train_dreambooth_lora_flux2.py`). Once the folder is present, end-to-end validation should run cleanly. Resume here next.
+- **Base model:** OneTrainer requires the diffusers-folder format (`black-forest-labs/FLUX.2-dev` from HF), not the single-file `.safetensors`. ~108 GB download (60 GB transformer + 45 GB Mistral + scheduler/VAE/configs).
+- **Per-trainer venv recommended.** `C:\OneTrainer\.venv` with Python 3.12, OneTrainer's pinned torch (`2.9.1+cu128`) — Blackwell-compatible despite cu128 (PTX forward-compat carries fp8 + bf16 fine).
+- **Latent cache is one-time:** ~10 minutes for 32 images at 512² on CPU VAE; subsequent runs reuse the cache (`workspace_dir`-keyed) only if you don't change the dataset/config.
 
 For **DiffSynth-Studio** users (modelscope's 12.4k-star trainer with a FLUX.2-dev LoRA recipe): a drop-in helper plus a 2-line integration guide is at [`examples/diffsynth/`](examples/diffsynth/). DiffSynth's `Flux2DiT` mirrors the diffusers `Flux2Transformer2DModel` field-for-field and uses PEFT for LoRA, so this port reuses the same pre-hook bridge shape. ~130 LOC, no patches to diffsynth itself. Upstream PR pending (would benefit from a bilingual Mandarin/English description for the modelscope community).
 
