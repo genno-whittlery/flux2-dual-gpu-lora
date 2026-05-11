@@ -154,7 +154,9 @@ Boundary placement is mid-`single_blocks` rather than at the double→single tra
 
 The patch lives in ai-toolkit today. A survey of other FLUX.2 LoRA trainers (musubi-tuner, OneTrainer, SimpleTuner, diffusers, diffusion-pipe, DiffSynth-Studio) and a recommended next port target lives at [`docs/trainer-survey.md`](docs/trainer-survey.md). Short version: **musubi-tuner** is the highest-leverage next target; **diffusers** `train_dreambooth_lora_flux2.py` is the easiest mechanical port.
 
-A concrete porting plan for musubi-tuner — hook points, complexity comparison, validation plan, upstream strategy — is at [`docs/porting-musubi-tuner.md`](docs/porting-musubi-tuner.md). Estimated 200–300 LOC, smaller than the ai-toolkit patch because musubi's text encoder is already disk-cached and its `LoRAModule.apply_to` is cleaner. Not yet implemented; contributions welcome.
+A concrete porting plan for musubi-tuner — hook points, complexity comparison, validation plan, upstream strategy — is at [`docs/porting-musubi-tuner.md`](docs/porting-musubi-tuner.md). The implementation lives on a Genno fork branch ([genno-whittlery/musubi-tuner:dual-gpu-flux2](https://github.com/genno-whittlery/musubi-tuner/tree/dual-gpu-flux2)) — +304 LOC across 3 files. Awaiting hardware validation before opening an upstream PR.
+
+For HuggingFace **diffusers** users (the `train_dreambooth_lora_flux2*.py` reference scripts): a drop-in helper file plus a 3-line integration guide is at [`examples/diffusers/`](examples/diffusers/). The diffusers port is the smallest of the three — PEFT handles LoRA routing automatically, and the helper uses PyTorch forward pre-hooks to bridge devices instead of overriding the transformer's forward. ~130 LOC, no patches to diffusers itself.
 
 ## Contributing
 
