@@ -127,9 +127,15 @@ def enable_flux2_dual_gpu(dit: nn.Module) -> nn.Module:
     dit.norm_out.to(cuda0)
     dit.proj_out.to(cuda0)
 
-    dit.single_transformer_blocks[split_at].register_forward_pre_hook(
-        _make_device_bridge_hook(cuda1), with_kwargs=True
-    )
+    # Per-block hook on every cuda:1 single_block — the forward loop passes
+    # loop-level constants (temb_mod_params, image_rotary_emb,
+    # joint_attention_kwargs) to each block; a boundary-only hook bridges
+    # only the first block's inputs, so subsequent blocks receive the
+    # originals from cuda:0 and crash with a device-mismatch error.
+    for block in dit.single_transformer_blocks[split_at:]:
+        block.register_forward_pre_hook(
+            _make_device_bridge_hook(cuda1), with_kwargs=True
+        )
     dit.norm_out.register_forward_pre_hook(
         _make_device_bridge_hook(cuda0), with_kwargs=True
     )
