@@ -2,7 +2,7 @@
 
 [DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio) (modelscope, 12.4k stars) ships a FLUX.2-dev LoRA training recipe under `examples/flux2/model_training/`. It's structurally close to HuggingFace diffusers: same Flux2DiT field layout, same PEFT-based LoRA injection, same `accelerate.Accelerator` wrapper.
 
-**Status (2026-05-11):** validated on 2× RTX 5090 — load + LoRA inject + fp8 weight-only quant + distribute + forward + backward all succeed; LoRA gradients land on both `cuda:0` and `cuda:1`, proving cross-device autograd through the split.
+**Status (2026-05-11):** validated end-to-end on 2× RTX 5090 — the full `sft:data_process` → `sft:train` pipeline from `examples/flux2/model_training/lora/FLUX.2-dev.sh` runs through, **2.69 s/it sustained** across 15 training steps on 3 cached sumi-v8 images, LoRA checkpoint (`epoch-0.safetensors`, 270 MB at rank 32) saved.
 
 This doc covers the three integration points and the one *novel* lesson the DiffSynth port surfaced: **the LoRA-skip `filter_fn` for `quantize_`**, which avoids the PEFT 0.19.1 × torchao 0.17 incompatibility that blocked the diffusers reference script.
 
@@ -119,6 +119,47 @@ With this filter:
 
 This is the **novel finding** of the DiffSynth port. The same fix likely unblocks the diffusers reference script — not retested.
 
+## Side-quest fixes encountered during validation
+
+Two upstream compatibility issues surfaced while wiring this through end-to-end. Neither is dual-GPU-related — both would also bite single-GPU users — but they're documented here so anyone reproducing the validation knows what to expect.
+
+### Mistral3 forward signature drift (transformers 5.8)
+
+`diffsynth/models/flux2_text_encoder.py` subclasses `Mistral3ForConditionalGeneration` and explicitly passes 15 positional args to `super().forward(...)`. transformers 5.8 trimmed `output_attentions`, `output_hidden_states`, `return_dict`, `cache_position` from the positional signature — they're now `TransformersKwargs`-only. The mismatched call dies with `TypeError: forward() takes from 1 to 11 positional arguments but 15 were given`.
+
+Patched in-place to forward args by name and re-inject `output_hidden_states` / `output_attentions` through `**kwargs` (the embedding pipeline depends on `output.hidden_states` being populated):
+
+```python
+def forward(self, input_ids=None, pixel_values=None, attention_mask=None, ...,
+            output_hidden_states=None, output_attentions=None, ..., **kwargs):
+    if output_hidden_states is not None:
+        kwargs.setdefault("output_hidden_states", output_hidden_states)
+    if output_attentions is not None:
+        kwargs.setdefault("output_attentions", output_attentions)
+    return super().forward(
+        input_ids=input_ids, pixel_values=pixel_values,
+        attention_mask=attention_mask, ...,
+        **kwargs,
+    )
+```
+
+### data_process can't fit Mistral-24B on a single 32 GB card
+
+`diffsynth/diffusion/runner.py::launch_data_process_task` unconditionally calls `model.to(accelerator.device)` before encoding. For FLUX.2, the loaded models are Mistral-3-Small-24B (~48 GB bf16) and the VAE — Mistral alone overflows 32 GB. Added an env-var-gated CPU-offload branch:
+
+```python
+_data_process_on_cpu = os.environ.get("DIFFSYNTH_DATA_PROCESS_ON_CPU", "false").lower() == "true"
+if not _data_process_on_cpu:
+    model.to(device=accelerator.device)
+    model, dataloader = accelerator.prepare(model, dataloader)
+else:
+    model, dataloader = accelerator.prepare(
+        model, dataloader, device_placement=[False, True],
+    )
+```
+
+Combined with `--initialize_model_on_cpu`, this lets the TE+VAE caching step run on CPU on cards that can't fit Mistral. It's slow (~1 min per image for 256-token captions at 512²), but it's a one-time pre-process before `sft:train` — and orthogonal to whether the subsequent training step uses one GPU or two.
+
 ## Setup
 
 Per-trainer venv (consistent with the other trainer ports — keeps torch/peft/accelerate pins independent):
@@ -152,7 +193,9 @@ The `sft:data_process` step (TE + VAE feature caching) is **orthogonal to the pa
 
 ## What was validated
 
-A 60-second smoke test that loads the real FLUX.2-dev transformer weights through `Flux2ImagePipeline.from_pretrained` (transformer-only, the same shape `sft:train` uses), injects PEFT LoRA at rank 32, applies the filtered fp8 quant, distributes via `enable_flux2_dual_gpu`, and runs a synthetic forward + backward. Assertions:
+Two layers of evidence:
+
+**Smoke test** — a 60-second standalone script that loads the real FLUX.2-dev transformer weights through `Flux2ImagePipeline.from_pretrained` (transformer-only, the same shape `sft:train` uses), injects PEFT LoRA at rank 32, applies the filtered fp8 quant, distributes via `enable_flux2_dual_gpu`, and runs a synthetic forward + backward. Assertions:
 
 - Device placement: `single_transformer_blocks[23]` on `cuda:0`, `[24]` on `cuda:1`, `norm_out` on `cuda:0`
 - VRAM after distribute: 20.7 GB cuda:0 / 12.6 GB cuda:1
@@ -160,7 +203,14 @@ A 60-second smoke test that loads the real FLUX.2-dev transformer weights throug
 - Backward succeeds (`loss=1.0781`)
 - LoRA gradient devices: `['cuda:0', 'cuda:1']` — proves cross-device autograd
 
-What this does NOT cover: the full `sft:train` runner loop with optimizer step and cached data — that's mechanically the same as the musubi-tuner / OneTrainer paths once the runner.py patch is in place. The novel risk (FLUX.2-specific forward through the cross-device split) is exactly what the smoke test exercises.
+**End-to-end run** — the full `sft:data_process` → `sft:train` pipeline straight from `examples/flux2/model_training/lora/FLUX.2-dev.sh`, on 3 sumi-v8 images at 512² resolution, rank-32 LoRA on 7 target-module families, 1 epoch × 5-repeat dataset = 15 steps:
+
+- `sft:data_process` on CPU-offloaded Mistral-24B: 3/3 images cached in 43s (~15 s/it)
+- `sft:train` distribute step: same 20.7 / 12.6 GB shape
+- `sft:train` steady-state: **2.69 s/it across 15/15 steps** (40s wall-clock)
+- LoRA checkpoint: `epoch-0.safetensors`, 270 MB
+
+This is the same bar that musubi-tuner and OneTrainer cleared in the same week.
 
 ## Upstream plan
 
