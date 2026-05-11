@@ -12,13 +12,20 @@ Train FLUX.2-dev LoRAs across any pair of 24+ GB CUDA GPUs (2× RTX 3090, 2× RT
 | **Dual RTX 5090, DiffSynth-Studio + this patch** | **2.69 s/it sustained** | **~18 min** |
 | Dual RTX 5090, OneTrainer + this patch | 0.95 s/it ⚠️ — see note below | — |
 
-> ⚠️ **OneTrainer is not apples-to-apples with the other three.** The OneTrainer config used `transformer.weight_dtype: INT_W8A8` (INT8 weights + INT8 activations through tensor cores) and a narrower LoRA target set (`layer_filter_preset: "blocks"`), while the other trainers ran bf16 / fp8-weight-only with wider LoRA targets. INT8 tensor-core matmul is ~2–3× faster than bf16 on Blackwell — most of the speed gap is precision, not trainer architecture. Re-running OneTrainer with bf16 base + matched LoRA targets would put it in the same 2–3 s/it band as the others. The "real" OneTrainer-specific wins (PEFT-style LoRA wrappers, diffusers-backed attention) are probably ~1.2–1.5× over musubi at most.
+> ⚠️ **OneTrainer is in a different compute-precision class.** The four trainers differ on *which* form of 8-bit they use, which matters because tensor-core dispatch depends on the *activation* dtype, not just the weight dtype:
+>
+> | Trainer | Weight | Activation @ matmul | TC class |
+> |---|---|---|---|
+> | ai-toolkit / musubi / DiffSynth + this patch | fp8 weight-only | bf16 | bf16 (~165 TF on 5090) |
+> | OneTrainer + this patch | INT8 (`INT_W8A8`) | INT8 | int8 (~330 TF on 5090) |
+>
+> The three "weight-only-fp8" trainers store weights in fp8 (memory halved — the whole reason this patch exists) but dequantize to bf16 at matmul time. OneTrainer's `INT_W8A8` keeps activations in 8-bit too, dispatching to the int8 GEMM which is ~2× the bf16 throughput on Blackwell. That accounts for most of the 2.69 → 0.95 s/it gap. A fair apples-to-apples re-run would set OneTrainer's `transformer.weight_dtype` to `FLOAT_8` (weight-only fp8) and the result should land in the same 2–3 s/it band as the other three. None of this is about the dual-GPU split — the split shape itself is identical across all four (20.7 GB cuda:0 / 12.6 GB cuda:1).
 
 Per-GPU footprint at runtime: ~20 GB on GPU 0, ~12 GB on GPU 1, both alternating at 99% SM utilization. No thrashing, no degradation.
 
 The musubi-tuner port runs ~21% faster than ai-toolkit on the same hardware (different attention path, different LoRA wrapper overhead) — validated end-to-end with `--fp8_base --fp8_scaled --gradient_checkpointing` on sumi v8 (32 imgs @ 512², 10-step smoke; loss 0.526 → 0.545 monotonic across the run; both checkpoints saved).
 
-The OneTrainer port sustained 1.05 it/s (0.95 s/it) through a full 32-step epoch on the same sumi v8 dataset and saved a 402 MB LoRA checkpoint. **But that run used INT8 weight + INT8 activation quant on the transformer and a narrower LoRA target set than the other trainers** — see the warning under the numbers table. Treat OneTrainer's number as evidence the patch works end-to-end on a fourth trainer, not as evidence of a 2.3× architectural advantage; an apples-to-apples bf16 / matched-LoRA-target run on OneTrainer would land in the same 2–3 s/it band as the others.
+The OneTrainer port sustained 1.05 it/s (0.95 s/it) through a full 32-step epoch on the same sumi v8 dataset and saved a 402 MB LoRA checkpoint. **But that run was in a different compute-precision class than the other three** — `INT_W8A8` quant on the transformer means the matmul dispatches to int8 tensor cores (~330 TF) rather than bf16 (~165 TF), giving a ~2× compute speedup that's orthogonal to the dual-GPU split. See the warning under the numbers table. Treat OneTrainer's number as evidence the patch works end-to-end on a fourth trainer, not as evidence of a 2.3× architectural advantage; an apples-to-apples run with OneTrainer's `transformer.weight_dtype` set to `FLOAT_8` (matching the other trainers' bf16-act / fp8-weight-only mode) would put it in the same 2–3 s/it band.
 
 ## Why this exists
 
