@@ -150,6 +150,10 @@ At hidden_size=6144, bf16, seq_len 1536 (512² + ~512 text tokens), batch 1:
 
 Boundary placement is mid-`single_blocks` rather than at the double→single transition because at that transition `img` and `txt` are still separate (~36 MB combined before cat) and modulation tensors are larger.
 
+## Porting to other trainers
+
+The patch lives in ai-toolkit today. A survey of other FLUX.2 LoRA trainers (musubi-tuner, OneTrainer, SimpleTuner, diffusers, diffusion-pipe, DiffSynth-Studio) and a recommended next port target lives at [`docs/trainer-survey.md`](docs/trainer-survey.md). Short version: **musubi-tuner** is the highest-leverage next target; **diffusers** `train_dreambooth_lora_flux2.py` is the easiest mechanical port.
+
 ## Contributing
 
 PRs welcome, especially:
