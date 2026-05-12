@@ -76,10 +76,13 @@ dit split_at = 24
 
 If both GPUs aren't being used, either `FLUX2_DUAL_GPU` is unset, `device_placement=False` was missed, or `enable_flux2_dual_gpu` was called before LoRA injection (call it after).
 
-## Validation status
+## Validation status — ✅ validated end-to-end (2× RTX 5090, 2026-05-11)
 
-- **The split shape is validated end-to-end on ai-toolkit** ([PR #829](https://github.com/ostris/ai-toolkit/pull/829)). The math (16 GB per side for the FLUX.2-dev transformer at fp8, ~18 MB activation per PCIe boundary crossing) applies identically here.
-- **The diffsynth-specific port is not yet end-to-end tested** — DiffSynth has its own training loop and accelerate config that may have edge cases. Please open an issue if you hit one.
+Full `sft:data_process` → `sft:train` flow runs through, 15/15 training steps at **2.69 s/it sustained**, LoRA checkpoint saved (270 MB, rank 32, 7 target-module families). Distribution matches the ai-toolkit / OneTrainer / musubi shape exactly: 20.7 GB cuda:0 / 12.6 GB cuda:1 after fp8 weight-only quant.
+
+Key finding: the PEFT × torchao incompatibility that blocks the diffusers reference script (`TorchaoLoraLinear`'s dispatcher not bridging CPU/CUDA for `WeightOnlyFloat8Tensor` base weights) is **avoidable** here with a one-line `filter_fn` on the `quantize_` call that excludes modules whose names contain `lora_A` / `lora_B` — LoRA's own Linear submodules stay bf16, so PEFT keeps using its normal `LoraLinear` and torchao never sees them.
+
+Beyond the drop-in helper, this port also needs four small integration edits — two in `examples/flux2/model_training/train.py` (CPU-load + fp8-quant + distribute), one in `diffsynth/diffusion/runner.py` (skip `model.to()` + `device_placement=[False, True, True, True]` to `accelerator.prepare`, for both the training and data_process tasks), one in `diffsynth/models/flux2_text_encoder.py` (transformers 5.8 compat — kwargs-only `super().forward`, re-injecting `output_hidden_states` through `TransformersKwargs`). The exact byte-surgery lives in [`patches/diffsynth/`](../../patches/diffsynth/). Detailed walkthrough: [`docs/porting-diffsynth-studio.md`](../../docs/porting-diffsynth-studio.md). Upstream PR: [modelscope/DiffSynth-Studio#1434](https://github.com/modelscope/DiffSynth-Studio/pull/1434).
 
 ## DiffSynth-specific considerations
 
@@ -89,4 +92,14 @@ If both GPUs aren't being used, either `FLUX2_DUAL_GPU` is unset, `device_placem
 
 ## Upstream PR
 
-Not yet submitted. The DiffSynth-Studio repo is modelscope/Alibaba — primary language is Mandarin in code comments / issue threads. A bilingual PR + a brief Chinese-language `README_CN.md` in the same directory would be the right shape for that community.
+[modelscope/DiffSynth-Studio#1434](https://github.com/modelscope/DiffSynth-Studio/pull/1434).
+
+---
+
+# Bonus: dual-GPU Wan video LoRA training (`wan_dual_gpu_diffsynth.py`)
+
+Same helper shape, applied to DiffSynth-Studio's `examples/wanvideo/model_training/`. Splits `WanModel` across two CUDA devices at the `blocks` midpoint — useful for the 14B Wan 2.x variants (I2V-A14B, T2V-A14B, S2V-14B), which fit a single 32 GB card on fp8-quantized *weights* alone but routinely OOM on *activations* at 480×832×49 frames + gradient checkpointing. The split gives the per-side activation headroom single-GPU users can't reach. Wan has one block type (`DiTBlock`) instead of FLUX.2's double + single split, so the helper only registers per-block hooks across one boundary.
+
+Env vars: `WAN_DUAL_GPU=true` (enable), `WAN_DUAL_GPU_SPLIT_AT=15` (override; default `num_blocks // 2`).
+
+**Status — 🚧 synthetic smoke validated, real-training end-to-end blocked upstream.** The cross-device split works: forward + backward complete across the boundary, LoRA gradients land on both cuda:0 and cuda:1 (smoke harness in [`patches/wan-smoke/`](../../patches/wan-smoke/)). Real-training validation is gated on an *unrelated* upstream patchify bug — `WanModel.patchify` returns the wrong shape + arity, breaking *any* Wan training forward call (issue [modelscope/DiffSynth-Studio#1063](https://github.com/modelscope/DiffSynth-Studio/issues/1063)). Both fixes filed as separate Genno PRs: [#1435](https://github.com/modelscope/DiffSynth-Studio/pull/1435) (patchify fix, single commit, fixes #1063) and [#1436](https://github.com/modelscope/DiffSynth-Studio/pull/1436) (dual-GPU helper, depends on #1435).
