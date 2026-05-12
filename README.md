@@ -2,6 +2,18 @@
 
 Train FLUX.2-dev LoRAs across any pair of 24+ GB CUDA GPUs (2× RTX 3090, 2× RTX 4090, 2× RTX 5090) with Mistral-3 kept in system RAM. Drop-in replacement for [ai-toolkit](https://github.com/ostris/ai-toolkit)'s FLUX.2 trainer, enabled via a single env var. First-known public implementation — closes the gap in ai-toolkit issue [#531](https://github.com/ostris/ai-toolkit/issues/531).
 
+The same dual-GPU split has since been ported to four more trainers (musubi-tuner, DiffSynth-Studio, OneTrainer, HuggingFace diffusers) and to Wan 2.x video LoRA training. The training-side patch isn't FLUX.2-specific in spirit — split the transformer at a low-traffic block boundary, keep the text encoder in system RAM, quantize weights to fp8 — only the integration points differ per trainer.
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `flux2_model.py`, `flux2_dual_gpu.py` | The ai-toolkit patch (the flagship — full-file replacement + the `Flux2DualGPUMixin`). Drop into ai-toolkit; see [Quick start](#quick-start). Upstream: [ai-toolkit#829](https://github.com/ostris/ai-toolkit/pull/829). |
+| [`inference/`](inference/) | Standalone dual-GPU FLUX.2 + LoRA rendering — `engine.py` (importable), `cli.py`, `recipe.py`. The thing ComfyUI / ai-toolkit's `run.py` can't do. See [Inference](#inference). |
+| [`examples/`](examples/) | Drop-in dual-GPU helper modules + quickstarts for the other trainers: `diffsynth/` (FLUX.2 + Wan video), `diffusers/`, `musubi/`, `onetrainer/`. |
+| [`patches/`](patches/) | The raw byte-surgery patcher scripts that inject the helpers + integration edits into each trainer's checkout, organized per-trainer with validation-status tags. Plus the optional ai-toolkit memory-probe diagnostic diff. See [`patches/README.md`](patches/README.md). |
+| [`docs/`](docs/) | Trainer survey + per-trainer porting walkthroughs. |
+
 ## The numbers
 
 | Setup | Step rate | 400 steps |
@@ -136,9 +148,21 @@ The patch applies six surgical changes against ai-toolkit's `Flux2Model`:
 
 Per-step cross-PCIe traffic: ~36 MB (one forward + one backward × 18 MB activation). At PCIe Gen5 x16 (~50 GB/s practical), this is ~1 ms — negligible vs the ~2.8 s compute step.
 
-## Examples
+## Inference
 
-`examples/inference_with_mistral_on_cpu.py` — minimal ComfyUI-API script showing the matching inference pattern (CLIPLoader with `device="cpu"`) so character LoRAs trained with this patch can run cleanly on a 24 GB inference GPU too.
+ComfyUI has no dual-GPU FLUX.2 path either, and ai-toolkit's own `run.py` "generate" / sample-during-training paths deadlock on a dual-GPU + TE-on-CPU config (the embed-cache/unload step hangs; `set_device_state` OOMs putting Mistral on cuda:0). [`inference/`](inference/) is a small standalone engine that drives ai-toolkit's `Flux2Model` / `LoRASpecialNetwork` / `generate_images` directly — so a LoRA trained with this patch renders under the exact same split + quantization the training ran in:
+
+```bash
+# one-off CLI  (--prompts is a JSON {name: prompt} object)
+<ai-toolkit-venv>/python inference/cli.py \
+    --lora out/your-character/your-character.safetensors \
+    --prompts prompts.json --out renders/ --strengths 0,0.6,1.0
+
+# declarative YAML recipe
+<ai-toolkit-venv>/python inference/recipe.py job.yaml
+```
+
+`inference/engine.py` exposes `load_flux2(base, lora=LoraSpec(...))` → `(model, pipeline, network)` and `render(model, pipeline, {name: prompt}, out=..., strengths=(...,))` for importing into other scripts (eval harnesses, dataset generation). Beyond the training patch it needs three small fixups — keep Mistral on CPU in `set_device_state`, no-op `transformers.PreTrainedModel.to(cuda)`, and pin `Flux2Pipeline._execution_device` to `cuda:0` (else it resolves to CPU — Mistral's device — and feeds CPU tensors to the cuda transformer). Throughput on 2× RTX 5090: ~80–140 s/image at 1024²/20 steps/cfg 4 (the per-prompt Mistral-on-CPU encode is the bottleneck, not the diffusion). See [`inference/README.md`](inference/README.md).
 
 ## Limitations
 
@@ -176,7 +200,7 @@ Boundary placement is mid-`single_blocks` rather than at the double→single tra
 
 The patch lives in ai-toolkit today. A survey of other FLUX.2 LoRA trainers (musubi-tuner, OneTrainer, SimpleTuner, diffusers, diffusion-pipe, DiffSynth-Studio) and a recommended next port target lives at [`docs/trainer-survey.md`](docs/trainer-survey.md). Short version: **musubi-tuner** is the highest-leverage next target; **diffusers** `train_dreambooth_lora_flux2.py` is the easiest mechanical port.
 
-A concrete porting plan for musubi-tuner — hook points, complexity comparison, validation plan, upstream strategy — is at [`docs/porting-musubi-tuner.md`](docs/porting-musubi-tuner.md). The implementation lives on a Genno fork branch ([genno-whittlery/musubi-tuner:dual-gpu-flux2](https://github.com/genno-whittlery/musubi-tuner/tree/dual-gpu-flux2)). **Validated end-to-end on 2× RTX 5090, 2026-05-11** — 10/10 steps with `--fp8_base --fp8_scaled --gradient_checkpointing`, loss 0.526 → 0.545 monotonic, 2.22 s/it sustained, both checkpoints saved. Upstream PR to kohya-ss/musubi-tuner pending. Patch consists of: a new `musubi_tuner/flux_2/flux2_dual_gpu.py` module, plus three integration-point edits in `hv_train_network.py` (DDP-bypass, CPU loading device, `device_placement=[False]` prepare branch) and one inlined device-pin in `networks/lora.py` (bound-method indirection in `apply_to` makes instance-level shimming unreliable, so the pin runs inline at the top of `LoRAModule.forward`).
+The drop-in helper plus a quickstart is at [`examples/musubi/`](examples/musubi/); a concrete porting plan — hook points, complexity comparison, validation plan, upstream strategy — is at [`docs/porting-musubi-tuner.md`](docs/porting-musubi-tuner.md); the full implementation lives on a Genno fork branch ([genno-whittlery/musubi-tuner:dual-gpu-flux2](https://github.com/genno-whittlery/musubi-tuner/tree/dual-gpu-flux2)). **Validated end-to-end on 2× RTX 5090, 2026-05-11** — 10/10 steps with `--fp8_base --fp8_scaled --gradient_checkpointing`, loss 0.526 → 0.545 monotonic, 2.22 s/it sustained, both checkpoints saved. Upstream PR to kohya-ss/musubi-tuner pending. Patch consists of: a new `musubi_tuner/flux_2/flux2_dual_gpu.py` module, plus three integration-point edits in `hv_train_network.py` (DDP-bypass, CPU loading device, `device_placement=[False]` prepare branch) and one inlined device-pin in `networks/lora.py` (bound-method indirection in `apply_to` makes instance-level shimming unreliable, so the pin runs inline at the top of `LoRAModule.forward`).
 
 For HuggingFace **diffusers** users (the `train_dreambooth_lora_flux2*.py` reference scripts): a drop-in helper file plus an integration guide is at [`examples/diffusers/`](examples/diffusers/). The helper uses PyTorch forward pre-hooks (registered on every cuda:1 block, not just the boundary — important for FLUX.2's modulation/temb loop pattern). ~150 LOC, no patches to diffusers itself.
 
@@ -186,7 +210,7 @@ The other validated trainers (ai-toolkit, musubi-tuner, OneTrainer) use weight-o
 
 **Update 2026-05-11**: the DiffSynth-Studio port (below) found that adding a one-line `filter_fn` to the `quantize_` call — excluding modules whose names contain `lora_A` or `lora_B` — avoids the dispatcher entirely (LoRA's own Linear submodules stay bf16, so PEFT keeps using its normal `LoraLinear` and torchao never sees them). The same fix likely unblocks the diffusers ref script — not retested.
 
-For **OneTrainer** users (the GUI-based trainer with FLUX.2 Dev + Klein support): the port lives on a Genno fork branch ([genno-whittlery/OneTrainer:dual-gpu-flux2](https://github.com/genno-whittlery/OneTrainer/tree/dual-gpu-flux2)). **Validated end-to-end on 2× RTX 5090, 2026-05-11** — full 32-step epoch on sumi v8, ~1.05 it/s sustained, LoRA saved. Patch consists of: a new `modules/util/Flux2DualGpu.py` module, plus two integration-point edits in `modules/model/Flux2Model.py` (forced TE-on-CPU + `transformer_to` routes to distribute). One companion change to the third-party `mgds` data-loader on branch [genno-whittlery/mgds:te-device-fix](https://github.com/genno-whittlery/mgds/tree/te-device-fix): `EncodeMistralText.get_item` moves `tokens` and `attention_mask` to `text_encoder.device` before the forward call, so CPU-hosted Mistral receives CPU-side inputs instead of cuda:0 ones. (Upstream PR to `Nerogar/OneTrainer` was filed as [#1450](https://github.com/Nerogar/OneTrainer/pull/1450) and closed by a maintainer who flagged a stale issue reference in the PR body; the technical content was not reviewed. The branch is still the canonical place to consume this patch — apply it locally to a `Nerogar/OneTrainer` checkout, or use the fork directly.) Setup notes:
+For **OneTrainer** users (the GUI-based trainer with FLUX.2 Dev + Klein support): the drop-in helper + quickstart is at [`examples/onetrainer/`](examples/onetrainer/); the full port lives on a Genno fork branch ([genno-whittlery/OneTrainer:dual-gpu-flux2](https://github.com/genno-whittlery/OneTrainer/tree/dual-gpu-flux2)). **Validated end-to-end on 2× RTX 5090, 2026-05-11** — full 32-step epoch on sumi v8, ~1.05 it/s sustained, LoRA saved. Patch consists of: a new `modules/util/Flux2DualGpu.py` module, plus two integration-point edits in `modules/model/Flux2Model.py` (forced TE-on-CPU + `transformer_to` routes to distribute). One companion change to the third-party `mgds` data-loader on branch [genno-whittlery/mgds:te-device-fix](https://github.com/genno-whittlery/mgds/tree/te-device-fix): `EncodeMistralText.get_item` moves `tokens` and `attention_mask` to `text_encoder.device` before the forward call, so CPU-hosted Mistral receives CPU-side inputs instead of cuda:0 ones. (Upstream PR to `Nerogar/OneTrainer` was filed as [#1450](https://github.com/Nerogar/OneTrainer/pull/1450) and closed by a maintainer who flagged a stale issue reference in the PR body; the technical content was not reviewed. The branch is still the canonical place to consume this patch — apply it locally to a `Nerogar/OneTrainer` checkout, or use the fork directly.) Setup notes:
 
 - **Base model:** OneTrainer requires the diffusers-folder format (`black-forest-labs/FLUX.2-dev` from HF), not the single-file `.safetensors`. ~108 GB download (60 GB transformer + 45 GB Mistral + scheduler/VAE/configs).
 - **Per-trainer venv recommended.** `C:\OneTrainer\.venv` with Python 3.12, OneTrainer's pinned torch (`2.9.1+cu128`) — Blackwell-compatible despite cu128 (PTX forward-compat carries fp8 + bf16 fine).

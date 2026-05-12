@@ -1,0 +1,73 @@
+accelerate.exe : The following values were not passed to `accelerate launch` and had defaults 
+used instead:
+At C:\tmp\run_wan_dualgpu_smoke.ps1:37 char:1
++ & C:\DiffSynth-Studio\.venv\Scripts\accelerate.exe launch --num_proce ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (The following v...s used instead::String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+	`--num_machines` was set to a value of `1`
+	`--mixed_precision` was set to a value of `'no'`
+	`--dynamo_backend` was set to a value of `'no'`
+To avoid this warning pass in values for each of the problematic parameters or run `accelerate 
+config`.
+W0511 10:14:29.589000 4344 
+Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are 
+currently not supported in Windows or MacOs.
+Traceback (most recent call last):
+  File "C:\DiffSynth-Studio\examples\wanvideo\model_training\train.py", line 157, in <module>
+    model = WanTrainingModule(
+            ^^^^^^^^^^^^^^^^^^
+  File "C:\DiffSynth-Studio\examples\wanvideo\model_training\train.py", line 35, in __init__
+    model_configs = self.parse_model_configs(model_paths, model_id_with_origin_paths, 
+fp8_models=fp8_models, offload_models=offload_models, device=device)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\DiffSynth-Studio\diffsynth\diffusion\training_module.py", line 184, in 
+parse_model_configs
+    model_paths = json.loads(model_paths)
+                  ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\mindo\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\Lib\json\__in
+it__.py", line 346, in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\mindo\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\Lib\json\deco
+der.py", line 338, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\mindo\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\Lib\json\deco
+der.py", line 356, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 2 (char 1)
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\DiffSynth-Studio\.venv\Scripts\accelerate.exe\__main__.py", line 7, in <module>
+  File "C:\DiffSynth-Studio\.venv\Lib\site-packages\accelerate\commands\accelerate_cli.py", line 
+50, in main
+    args.func(args)
+  File "C:\DiffSynth-Studio\.venv\Lib\site-packages\accelerate\commands\launch.py", line 1405, in 
+launch_command
+    simple_launcher(args)
+  File "C:\DiffSynth-Studio\.venv\Lib\site-packages\accelerate\commands\launch.py", line 993, in 
+simple_launcher
+    raise subprocess.CalledProcessError(returncode=process.returncode, cmd=cmd)
+subprocess.CalledProcessError: Command '['C:\\DiffSynth-Studio\\.venv\\Scripts\\python.exe', 
+'examples/wanvideo/model_training/train.py', '--dataset_base_path', 
+'data/diffsynth_example_dataset/wanvideo/Wan2.2-I2V-A14B', '--dataset_metadata_path', 
+'data/diffsynth_example_dataset/wanvideo/Wan2.2-I2V-A14B/metadata.csv', '--height', '480', 
+'--width', '832', '--num_frames', '49', '--dataset_repeat', '5', '--num_epochs', '1', 
+'--model_paths', '[F:/models/Wan-AI/Wan2.2-I2V-A14B/high_noise_model/diffusion_pytorch_model-00001
+-of-00006.safetensors,F:/models/Wan-AI/Wan2.2-I2V-A14B/high_noise_model/diffusion_pytorch_model-00
+002-of-00006.safetensors,F:/models/Wan-AI/Wan2.2-I2V-A14B/high_noise_model/diffusion_pytorch_model
+-00003-of-00006.safetensors,F:/models/Wan-AI/Wan2.2-I2V-A14B/high_noise_model/diffusion_pytorch_mo
+del-00004-of-00006.safetensors,F:/models/Wan-AI/Wan2.2-I2V-A14B/high_noise_model/diffusion_pytorch
+_model-00005-of-00006.safetensors,F:/models/Wan-AI/Wan2.2-I2V-A14B/high_noise_model/diffusion_pyto
+rch_model-00006-of-00006.safetensors,F:/models/Wan-AI/Wan2.2-I2V-A14B/models_t5_umt5-xxl-enc-bf16.
+pth,F:/models/Wan-AI/Wan2.2-I2V-A14B/Wan2.1_VAE.pth]', '--learning_rate', '1e-4', 
+'--remove_prefix_in_ckpt', 'pipe.dit.', '--output_path', './models/train/wan22_dualgpu_smoke', 
+'--lora_base_model', 'dit', '--lora_target_modules', 'q,k,v,o,ffn.0,ffn.2', '--lora_rank', '32', 
+'--extra_inputs', 'input_image', '--max_timestep_boundary', '0.358', '--min_timestep_boundary', 
+'0', '--use_gradient_checkpointing', '--initialize_model_on_cpu']' returned non-zero exit status 
+1.
