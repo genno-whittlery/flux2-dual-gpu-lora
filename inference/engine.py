@@ -170,13 +170,19 @@ def load_flux2(base=DEFAULT_BASE, lora=None, *, primary_device="cuda:0", dtype="
 
 
 def render(sd, pipeline, prompts, *, out, network=None, strengths=(1.0,),
-           width=1024, height=1024, steps=20, cfg=4.0, seed=42, ext="png", log=_log):
-    """Render ``{name: prompt}`` at each LoRA strength into ``out`` as ``{name}__s{NNN}.{ext}``.
+           seeds=None, width=1024, height=1024, steps=20, cfg=4.0, seed=42, ext="png", log=_log):
+    """Render ``{name: prompt}`` at each (strength, seed) into ``out``.
+
+    Output filenames:
+      - single-seed (``seeds=None`` or ``(N,)``): ``{name}__s{NNN}.{ext}``
+      - multi-seed (``seeds=(N1, N2, …)``): ``{name}__s{NNN}__seed{N}.{ext}``
 
     Returns the total number of images written.
     """
     from toolkit.config_modules import GenerateImageConfig
 
+    seed_list = tuple(seeds) if seeds else (seed,)
+    multi = len(seed_list) > 1
     os.makedirs(out, exist_ok=True)
     total = 0
     for strength in strengths:
@@ -184,13 +190,16 @@ def render(sd, pipeline, prompts, *, out, network=None, strengths=(1.0,),
             network.multiplier = strength
         configs = []
         for name, prompt in prompts.items():
-            tag = f"{name}__s{int(round(strength * 100)):03d}"
-            configs.append(GenerateImageConfig(
-                prompt=prompt, width=width, height=height,
-                num_inference_steps=steps, guidance_scale=cfg,
-                negative_prompt="", seed=seed, network_multiplier=strength,
-                output_path=os.path.join(out, f"{tag}.{ext}"), output_ext=f".{ext}",
-            ))
+            for s in seed_list:
+                tag = f"{name}__s{int(round(strength * 100)):03d}"
+                if multi:
+                    tag += f"__seed{s}"
+                configs.append(GenerateImageConfig(
+                    prompt=prompt, width=width, height=height,
+                    num_inference_steps=steps, guidance_scale=cfg,
+                    negative_prompt="", seed=s, network_multiplier=strength,
+                    output_path=os.path.join(out, f"{tag}.{ext}"), output_ext=f".{ext}",
+                ))
         log(f"strength {strength}: generating {len(configs)} images -> {out}")
         sd.generate_images(configs, pipeline=pipeline)
         total += len(configs)

@@ -32,7 +32,8 @@ def main():
     ap.add_argument("--cfg", type=float, default=4.0)
     ap.add_argument("--width", type=int, default=1024)
     ap.add_argument("--height", type=int, default=1024)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, default=42, help="single seed (default 42; ignored if --seeds is given)")
+    ap.add_argument("--seeds", help="comma-separated seeds, e.g. 42,43,44 (overrides --seed; adds __seedN to output filenames)")
     ap.add_argument("--strengths", default="1.0", help="comma-separated LoRA multipliers, e.g. 0,0.6,1.0")
     ap.add_argument("--ext", default="png")
     args = ap.parse_args()
@@ -40,10 +41,11 @@ def main():
     with open(args.prompts, "r", encoding="utf-8") as fh:
         prompts = json.load(fh)
     strengths = tuple(float(x) for x in args.strengths.split(",") if x.strip() != "")
+    seeds = tuple(int(x) for x in args.seeds.split(",") if x.strip() != "") if args.seeds else None
     lora = LoraSpec(args.lora, args.lora_rank, args.lora_alpha) if args.lora else None
 
     sd, pipeline, net = load_flux2(args.base, lora)
-    render(sd, pipeline, prompts, out=args.out, network=net, strengths=strengths,
+    render(sd, pipeline, prompts, out=args.out, network=net, strengths=strengths, seeds=seeds,
            width=args.width, height=args.height, steps=args.steps, cfg=args.cfg,
            seed=args.seed, ext=args.ext)
 
