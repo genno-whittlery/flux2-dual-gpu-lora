@@ -8,7 +8,15 @@ first. This script then makes two surgical edits so the mixin actually runs:
   1. ``wan22_5b_model.py``  — import the mixin and prepend it to the
      ``Wan225bModel`` MRO so ``setup_dual_gpu_distribution`` resolves on
      the class.
-  2. ``wan21.py``  — soften the existing
+  2. ``wan22_14b_model.py``  — import the mixin and prepend it to the
+     ``Wan2214bModel`` MRO (also covers ``Wan2214bI2VModel`` via
+     inheritance). Soften the model's own
+     ``raise ValueError("Splitting model over gpus is not supported for
+     Wan2.2 models")`` in ``load_wan_transformer`` (the 14B variants
+     override this method), and call ``setup_dual_gpu_distribution`` on
+     each of the two transformers (high-noise + low-noise expert) after
+     each is quantized.
+  3. ``wan21.py``  — soften the existing
      ``raise ValueError("Splitting model over gpus is not supported for
      Wan2.1 models")``; when ``WAN_DUAL_GPU=true`` *and* the model class
      provides ``setup_dual_gpu_distribution`` (i.e. it inherits the
@@ -57,7 +65,124 @@ else:
     print(f"wan22_5b_model.py: PATCHED")
 
 
-# ── Edit 2: wan21.py — soften raise + call setup_dual_gpu_distribution ────────
+# ── Edit 2: wan22_14b_model.py — add mixin to MRO + per-transformer distribute ─
+
+p_14b = AI_TOOLKIT_ROOT / "extensions_built_in" / "diffusion_models" / "wan22" / "wan22_14b_model.py"
+src_14b = p_14b.read_text()
+
+import_marker_14b = "from .wan22_dual_gpu import Wan22DualGPUMixin"
+class_after_14b = "class Wan2214bModel(Wan22DualGPUMixin, Wan21):"
+class_before_14b = "class Wan2214bModel(Wan21):"
+
+if (
+    import_marker_14b in src_14b
+    and class_after_14b in src_14b
+    and "use_dual_gpu = (" in src_14b
+):
+    print(f"wan22_14b_model.py: ALREADY_PATCHED")
+else:
+    if class_before_14b not in src_14b:
+        sys.exit(f"PATTERN_NOT_FOUND in {p_14b} (expected '{class_before_14b}')")
+
+    # Inject the import after the 5B-helpers import.
+    import_anchor_14b = "from toolkit.models.wan21.wan21 import Wan21"
+    if import_anchor_14b not in src_14b:
+        sys.exit(f"PATTERN_NOT_FOUND in {p_14b} (expected anchor '{import_anchor_14b}')")
+    src_14b = src_14b.replace(
+        import_anchor_14b,
+        import_anchor_14b + "\n" + import_marker_14b,
+    )
+
+    # Add mixin to MRO.
+    src_14b = src_14b.replace(class_before_14b, class_after_14b)
+
+    # Soften the raise at the top of load_wan_transformer.
+    old_raise = (
+        '    def load_wan_transformer(self, transformer_path, subfolder=None):\n'
+        '        if self.model_config.split_model_over_gpus:\n'
+        '            raise ValueError(\n'
+        '                "Splitting model over gpus is not supported for Wan2.2 models"\n'
+        '            )'
+    )
+    new_raise = (
+        '    def load_wan_transformer(self, transformer_path, subfolder=None):\n'
+        '        # Dual-GPU model-parallel: distribute each of the two transformers\n'
+        '        # (high-noise + low-noise experts) across cuda:0/cuda:1 individually.\n'
+        '        # The DualWanTransformer3DModel wrapper still routes by timestep\n'
+        '        # boundary; whichever expert it picks now runs through our split\n'
+        '        # forward. Activates when WAN_DUAL_GPU=true.\n'
+        '        use_dual_gpu = (\n'
+        '            hasattr(self, \'setup_dual_gpu_distribution\')\n'
+        '            and os.getenv("WAN_DUAL_GPU", "false").lower() == "true"\n'
+        '        )\n'
+        '        if self.model_config.split_model_over_gpus and not use_dual_gpu:\n'
+        '            raise ValueError(\n'
+        '                "Splitting model over gpus is not supported for Wan2.2 models"\n'
+        '            )'
+    )
+    if old_raise not in src_14b:
+        sys.exit(f"PATTERN_NOT_FOUND in {p_14b} (load_wan_transformer raise block)")
+    src_14b = src_14b.replace(old_raise, new_raise)
+
+    # Transformer 1 and 2 each get the same low_vram-or-dual-GPU branch +
+    # post-quantize distribute call. The two blocks are byte-identical in the
+    # source modulo the trailing "1"/"2"; patch them in turn.
+    for idx in ("1", "2"):
+        old_block = (
+            f'        if self.model_config.low_vram:\n'
+            f'            # quantize on the device\n'
+            f'            transformer_{idx}.to(\'cpu\', dtype=dtype)\n'
+            f'            flush()\n'
+            f'        else:\n'
+            f'            transformer_{idx}.to(self.device_torch, dtype=dtype)\n'
+            f'            flush()\n'
+            f'\n'
+            f'        if self.model_config.quantize and self.model_config.accuracy_recovery_adapter is None:\n'
+            f'            # todo handle two ARAs\n'
+            f'            self.print_and_status_update("Quantizing Transformer {idx}")\n'
+            f'            quantize_model(self, transformer_{idx})\n'
+            f'            flush()\n'
+            f'\n'
+            f'        if self.model_config.low_vram:\n'
+            f'            self.print_and_status_update("Moving transformer {idx} to CPU")\n'
+            f'            transformer_{idx}.to("cpu")\n'
+            f'        else:\n'
+            f'            transformer_{idx}.to(self.device_torch)\n'
+        )
+        new_block = (
+            f'        if self.model_config.low_vram or use_dual_gpu:\n'
+            f'            # quantize on CPU; for dual-GPU, distribution happens post-quant\n'
+            f'            transformer_{idx}.to(\'cpu\', dtype=dtype)\n'
+            f'            flush()\n'
+            f'        else:\n'
+            f'            transformer_{idx}.to(self.device_torch, dtype=dtype)\n'
+            f'            flush()\n'
+            f'\n'
+            f'        if self.model_config.quantize and self.model_config.accuracy_recovery_adapter is None:\n'
+            f'            # todo handle two ARAs\n'
+            f'            self.print_and_status_update("Quantizing Transformer {idx}")\n'
+            f'            quantize_model(self, transformer_{idx})\n'
+            f'            flush()\n'
+            f'\n'
+            f'        if use_dual_gpu:\n'
+            f'            self.print_and_status_update("Distributing Transformer {idx} across cuda:0/cuda:1")\n'
+            f'            self.setup_dual_gpu_distribution(transformer_{idx}, dtype)\n'
+            f'            flush()\n'
+            f'        elif self.model_config.low_vram:\n'
+            f'            self.print_and_status_update("Moving transformer {idx} to CPU")\n'
+            f'            transformer_{idx}.to("cpu")\n'
+            f'        else:\n'
+            f'            transformer_{idx}.to(self.device_torch)\n'
+        )
+        if old_block not in src_14b:
+            sys.exit(f"PATTERN_NOT_FOUND in {p_14b} (transformer_{idx} block)")
+        src_14b = src_14b.replace(old_block, new_block)
+
+    p_14b.write_text(src_14b)
+    print(f"wan22_14b_model.py: PATCHED")
+
+
+# ── Edit 3: wan21.py — soften raise + call setup_dual_gpu_distribution ────────
 
 p_wan21 = AI_TOOLKIT_ROOT / "toolkit" / "models" / "wan21" / "wan21.py"
 src_wan21 = p_wan21.read_text()
